@@ -19,7 +19,7 @@ CAPTURE METHODS (auto-selected at startup)
                compositor buffer. Lowest latency, zero CPU copy.  Requires dxcam.
     mss     → software / GDI fallback if dxcam is not installed.
 
-MODELS  (select in Settings tab – drop next to this script or set full path)
+MODELS  (select in Settings tab – place in %LOCALAPPDATA%\veraiassets or set full path)
     yolov8n.pt  →  fastest  (~30+ fps on CPU after resize optimisation)
     yolov8s.pt  →  better accuracy, still fast
     yolov8m.pt  →  most accurate of the common ones
@@ -171,13 +171,15 @@ state = State()
 MODEL_OPTIONS = ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt", "yolov8l.pt", "yolov8x.pt"]
 
 def _refresh_model_options():
-    """Scan script directory for .engine and .onnx files and add them to the dropdown."""
-    here = os.path.dirname(os.path.abspath(__file__))
+    """Scan veraiassets folder for .engine and .onnx files and add them to the dropdown."""
     found = []
-    for f in sorted(os.listdir(here)):
-        if f.endswith(".engine") or f.endswith(".onnx"):
-            if f not in MODEL_OPTIONS:
-                found.append(f)
+    try:
+        for f in sorted(os.listdir(_ASSETS_DIR)):
+            if f.endswith(".engine") or f.endswith(".onnx"):
+                if f not in MODEL_OPTIONS:
+                    found.append(f)
+    except Exception:
+        pass
     for f in found:
         MODEL_OPTIONS.append(f)
     if found:
@@ -189,7 +191,9 @@ _model_dd_open: bool = False
 # ════════════════════════════════════════════════════════
 #  CONFIG SYSTEM  (.cfg save / load)
 # ════════════════════════════════════════════════════════
-_CFG_DIR = os.path.dirname(os.path.abspath(__file__))
+_ASSETS_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "veraiassets")
+os.makedirs(_ASSETS_DIR, exist_ok=True)
+_CFG_DIR = _ASSETS_DIR
 _cfg_options: list = []          # list of .cfg filenames found on disk
 _cfg_dd_open: bool = False       # configs dropdown open state
 _cfg_export_flash: float = 0.0   # timestamp of last export (for brief flash feedback)
@@ -555,7 +559,7 @@ def draw_model_dropdown(dl, x, y, w):
                 ck = "+"; cw = imgui.calc_text_size(ck).x
                 fdl.add_text(x+w-cw-int(7*sc), py+(H-oh)/2.0, u(r,g,b,1.0), ck)
             if hov_row and clicked:
-                state.model_path = opt; _model_dd_open = False
+                state.model_path = os.path.join(_ASSETS_DIR, opt); _model_dd_open = False
                 _dd_click_consumed = True
             py += H
         fdl.add_rect(x, y+H, x+w, py, u(r,g,b,0.70), thickness=1.0)
@@ -1033,6 +1037,9 @@ def _detector_loop():
 
         want_device = _GPU_DEVICE if (state.use_gpu and _any_gpu_ok()) else "cpu"
         mp = state.model_path.strip()
+        # If mp is a bare filename (no directory component), resolve it inside veraiassets
+        if mp and not os.path.dirname(mp):
+            mp = os.path.join(_ASSETS_DIR, mp)
 
         # Reload model only when path or device changes
         if mp != last_path or want_device != last_device:
@@ -2394,7 +2401,7 @@ def run():
     print("[Verai] YOLO overlay ready")
     print("  INSERT  →  toggle menu")
     print("  F2      →  toggle debug window")
-    print("  Place yolov8n.pt next to this script, or set path in Settings tab")
+    print(f"  Place model files in: {_ASSETS_DIR}")
 
     frames = 0; t0 = time.time()
 
