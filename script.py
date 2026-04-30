@@ -197,6 +197,7 @@ _CFG_DIR = _ASSETS_DIR
 _cfg_options: list = []          # list of .cfg filenames found on disk
 _cfg_dd_open: bool = False       # configs dropdown open state
 _cfg_export_flash: float = 0.0   # timestamp of last export (for brief flash feedback)
+_cfg_selected: str = ""          # currently selected/loaded config filename
 
 def _scan_cfg_files():
     """Refresh the list of .cfg files next to the script."""
@@ -566,11 +567,16 @@ def draw_model_dropdown(dl, x, y, w):
 
 def draw_cfg_dropdown(dl, x, y, w):
     """Configs dropdown – lists .cfg files in the script folder."""
-    global _cfg_dd_open, _dd_click_consumed
+    global _cfg_dd_open, _dd_click_consumed, _cfg_selected
     sc = _dpi(); H = int(18*sc); r, g, b = _acc_rgb()
     opts = _cfg_options  # already refreshed on export / startup
-    label = opts[0] if opts else "-empty-"  # show first only as placeholder; selection is separate
-    label = "-empty-" if not opts else label
+    # Show the selected config name, or a placeholder if nothing selected yet
+    if not opts:
+        label = "-empty-"
+    elif _cfg_selected and _cfg_selected in opts:
+        label = _cfg_selected
+    else:
+        label = "select config"
     mouse = imgui.get_mouse_pos()
     clicked = imgui.is_mouse_clicked(0) and not _dd_click_consumed
     hov_hdr = (x <= mouse[0] <= x+w) and (y <= mouse[1] <= y+H)
@@ -612,6 +618,7 @@ def draw_cfg_dropdown(dl, x, y, w):
             if hov_row and clicked:
                 _cfg_dd_open = False
                 _dd_click_consumed = True
+                _cfg_selected = opt
                 _load_cfg(opt)
             py += H
         fdl.add_rect(x, y+H, x+w, py, u(r,g,b,0.70), thickness=1.0)
@@ -1400,6 +1407,30 @@ def _gui():
 
     gw = GW(); th = TITLE(); tabh = TABS_H(); rowh = ROW_H(); sc = _dpi(); gh = GH()
 
+    # ── Pre-consume clicks inside open color picker panels ─────────────────
+    # The picker popups are drawn on the foreground draw list (visual only).
+    # Without this guard, clicks inside the picker area fall through to the
+    # invisible_button rows underneath and toggle unrelated settings.
+    if imgui.is_mouse_clicked(0):
+        def _cp_panel_rect(cp_wx, cp_wy):
+            PAD=int(8*sc); SV_SZ=int(80*sc); HUE_W=int(14*sc); GAP=int(6*sc); PRV_W=int(20*sc)
+            pw = PAD+SV_SZ+GAP+HUE_W+GAP+PRV_W+PAD; ph = PAD+SV_SZ+PAD
+            px = int(clamp(cp_wx-pw//2, 4, SW-pw-4))
+            py_ = int(clamp(cp_wy, 4, SH-ph-4))
+            return px, py_, pw, ph
+        _mx, _my = imgui.get_mouse_pos()
+        for _open_flag, _cp_wx_val, _cp_wy_val in (
+            (_accent_open,  _cp_wx,         _cp_wy),
+            (_box_cp_open,  _box_cp_wx,     _box_cp_wy),
+            (_conf_cp_open, _conf_cp_wx,    _conf_cp_wy),
+            (_outline_cp_open, _outline_cp_wx, _outline_cp_wy),
+        ):
+            if _open_flag and _cp_wx_val >= 0:
+                _px, _py, _pw, _ph = _cp_panel_rect(_cp_wx_val, _cp_wy_val)
+                if _px <= _mx <= _px+_pw and _py <= _my <= _py+_ph:
+                    _dd_click_consumed = True
+                    break
+
     mouse = imgui.get_mouse_pos()
     in_tb = wx < mouse[0] < wx+gw and wy < mouse[1] < wy+th
     if in_tb and imgui.is_mouse_clicked(0):
@@ -1733,7 +1764,7 @@ def _gui():
         dl.add_rect(bx_b,by_b,bx_b+SW_BTN,by_b+SH_BTN,b_border,thickness=1.0)
         mouse_ = imgui.get_mouse_pos()
         in_btn_b = (bx_b<=mouse_[0]<=bx_b+SW_BTN) and (by_b<=mouse_[1]<=by_b+SH_BTN)
-        if in_btn_b and imgui.is_mouse_clicked(0):
+        if in_btn_b and imgui.is_mouse_clicked(0) and not _dd_click_consumed:
             _box_cp_open = not _box_cp_open
             if _box_cp_open:
                 _box_cp_just_opened = True
@@ -1756,7 +1787,7 @@ def _gui():
         c_border = u(1,1,1,0.55) if _conf_cp_open else ct(C_BORDER,1.0)
         dl.add_rect(bx_c2,by_c2,bx_c2+SW_BTN,by_c2+SH_BTN,c_border,thickness=1.0)
         in_btn_c = (bx_c2<=mouse_[0]<=bx_c2+SW_BTN) and (by_c2<=mouse_[1]<=by_c2+SH_BTN)
-        if in_btn_c and imgui.is_mouse_clicked(0):
+        if in_btn_c and imgui.is_mouse_clicked(0) and not _dd_click_consumed:
             _conf_cp_open = not _conf_cp_open
             if _conf_cp_open:
                 _conf_cp_just_opened = True
@@ -1778,7 +1809,7 @@ def _gui():
         o_border = u(1,1,1,0.55) if _outline_cp_open else ct(C_BORDER,1.0)
         dl.add_rect(bx_o,by_o,bx_o+SW_BTN,by_o+SH_BTN,o_border,thickness=1.0)
         in_btn_o = (bx_o<=mouse_[0]<=bx_o+SW_BTN) and (by_o<=mouse_[1]<=by_o+SH_BTN)
-        if in_btn_o and imgui.is_mouse_clicked(0):
+        if in_btn_o and imgui.is_mouse_clicked(0) and not _dd_click_consumed:
             _outline_cp_open = not _outline_cp_open
             if _outline_cp_open:
                 _outline_cp_just_opened = True
@@ -1819,7 +1850,7 @@ def _gui():
         dl.add_rect(bx_,by_,bx_+SW_BTN,by_+SH_BTN,border_col,thickness=1.0)
         mouse_ = imgui.get_mouse_pos()
         in_btn = (bx_<=mouse_[0]<=bx_+SW_BTN) and (by_<=mouse_[1]<=by_+SH_BTN)
-        if in_btn and imgui.is_mouse_clicked(0):
+        if in_btn and imgui.is_mouse_clicked(0) and not _dd_click_consumed:
             _accent_open = not _accent_open
             if _accent_open:
                 _accent_just_opened = True
@@ -1950,6 +1981,8 @@ def _gui():
         _draw_color_picker_at(fdl, px+PAD, py_+PAD, sc)  # accent – no h_ref, edits globals
         mouse_ = imgui.get_mouse_pos()
         in_panel = (px<=mouse_[0]<=px+pw) and (py_<=mouse_[1]<=py_+ph)
+        if in_panel and imgui.is_mouse_clicked(0):
+            _dd_click_consumed = True
         if _accent_just_opened:
             _accent_just_opened = False
         elif imgui.is_mouse_clicked(0) and not in_panel:
@@ -1972,6 +2005,8 @@ def _gui():
         state.box_color_h = _bh[0]; state.box_color_s = _bs[0]; state.box_color_v = _bv[0]
         mouse_ = imgui.get_mouse_pos()
         in_panel = (px<=mouse_[0]<=px+pw) and (py_<=mouse_[1]<=py_+ph)
+        if in_panel and imgui.is_mouse_clicked(0):
+            _dd_click_consumed = True
         if _box_cp_just_opened:
             _box_cp_just_opened = False
         elif imgui.is_mouse_clicked(0) and not in_panel:
@@ -1994,6 +2029,8 @@ def _gui():
         state.conf_color_h = _ch[0]; state.conf_color_s = _cs[0]; state.conf_color_v = _cv[0]
         mouse_ = imgui.get_mouse_pos()
         in_panel = (px<=mouse_[0]<=px+pw) and (py_<=mouse_[1]<=py_+ph)
+        if in_panel and imgui.is_mouse_clicked(0):
+            _dd_click_consumed = True
         if _conf_cp_just_opened:
             _conf_cp_just_opened = False
         elif imgui.is_mouse_clicked(0) and not in_panel:
@@ -2016,6 +2053,8 @@ def _gui():
         state.outline_color_h = _oh[0]; state.outline_color_s = _os[0]; state.outline_color_v = _ov[0]
         mouse_ = imgui.get_mouse_pos()
         in_panel = (px<=mouse_[0]<=px+pw) and (py_<=mouse_[1]<=py_+ph)
+        if in_panel and imgui.is_mouse_clicked(0):
+            _dd_click_consumed = True
         if _outline_cp_just_opened:
             _outline_cp_just_opened = False
         elif imgui.is_mouse_clicked(0) and not in_panel:
