@@ -95,14 +95,18 @@ class State:
     lock = threading.Lock()
 
     # YOLO
-    enabled      = True
-    confidence   = 0.45
-    model_path   = "yolov8n.pt"
-    detections   = []        # [(x1,y1,x2,y2,conf), ...] screen coords – raw from model
-    smooth_dets  = []        # temporally smoothed detections for display / aim
-    fps_det      = 0.0
-    model_loaded = False
-    model_error  = ""
+    enabled           = True
+    confidence        = 0.45
+    model_path        = "yolov8n.pt"
+    detections        = []        # [(x1,y1,x2,y2,conf), ...] screen coords – raw from model
+    smooth_dets       = []        # temporally smoothed detections for display / aim
+    fps_det           = 0.0
+    model_loaded      = False
+    model_error       = ""
+
+    # Bridge Confidence – fill gaps between detection hits via prediction/extended TTL
+    # Each bridged track carries a 'bridged' flag so the overlay can render it differently.
+    bridge_confidence = False     # [BETA] master toggle
 
     # Aim PID controller state
     # PID replaces EMA: P=proportional (speed), D=derivative (damping, kills recoil jitter)
@@ -246,6 +250,7 @@ def _export_cfg(name: str = ""):
         f"confidence      = {state.confidence:.4f}\n",
         f"fov_r           = {state.fov_r}\n",
         f"model_path      = {state.model_path}\n",
+        f"bridge_confidence = {int(state.bridge_confidence)}\n",
         f"\n[aim]\n",
         f"aim_enabled     = {int(state.aim_enabled)}\n",
         f"aim_smooth      = {state.aim_smooth:.4f}\n",
@@ -333,6 +338,7 @@ def _load_cfg(filename: str):
     state.confidence    = _f("confidence",   state.confidence)
     state.fov_r         = _i("fov_r",        state.fov_r)
     state.model_path    = _s("model_path",   state.model_path)
+    state.bridge_confidence = _b("bridge_confidence", state.bridge_confidence)
     # aim
     state.aim_enabled     = _b("aim_enabled",     state.aim_enabled)
     state.aim_smooth      = _f("aim_smooth",       state.aim_smooth)
@@ -797,8 +803,13 @@ def draw_detections(dl):
     if state.show_fov:
         dl.add_rect(rx, ry, rx+rw, ry+rh, u(1,1,1,0.65), thickness=1.0)
 
+    # ── If detection is off, show nothing ────────────────────────
+    if not state.enabled:
+        return
+
+    # Use smooth_dets for visuals (temporally stable, no flicker)
     with state.lock:
-        draw_list = list(state.detections)
+        draw_list = list(state.smooth_dets) if state.smooth_dets else []
 
     # ── Silhouette outline – independent of show_boxes ───────────
     if state.show_outline and draw_list:
@@ -808,7 +819,10 @@ def draw_detections(dl):
             or_, og_, ob_ = _acc_rgb()
         for entry in draw_list:
             x1, y1, x2, y2 = entry[0], entry[1], entry[2], entry[3]
-            _draw_human_silhouette(dl, x1, y1, x2, y2, or_, og_, ob_, alpha=0.30)
+            # bridged tracks (index 6) are drawn at reduced alpha
+            bridged = len(entry) > 6 and entry[6]
+            _draw_human_silhouette(dl, x1, y1, x2, y2, or_, og_, ob_,
+                                   alpha=0.15 if bridged else 0.30)
 
     if not state.show_boxes:
         return
@@ -827,24 +841,50 @@ def draw_detections(dl):
 
     for entry in draw_list:
         x1, y1, x2, y2, conf = entry[0], entry[1], entry[2], entry[3], entry[4]
-        dl.add_rect(x1, y1, x2, y2, u(br, bg, bb, 0.90), thickness=1.5)
+        bridged = len(entry) > 6 and entry[6]
+
+        if bridged:
+            # ── bridged track: dashed/dimmed corners to signal prediction fill ──
+            # Draw corner ticks instead of a full rect so the user can see at a
+            # glance that this box is being bridged (not a live detection).
+            b_alpha = 0.45
+            TICK_LEN = max(6, int((x2 - x1) * 0.18))
+            col_b = u(br, bg, bb, b_alpha)
+            # top-left
+            dl.add_line(x1, y1, x1 + TICK_LEN, y1, col_b, 1.2)
+            dl.add_line(x1, y1, x1, y1 + TICK_LEN, col_b, 1.2)
+            # top-right
+            dl.add_line(x2, y1, x2 - TICK_LEN, y1, col_b, 1.2)
+            dl.add_line(x2, y1, x2, y1 + TICK_LEN, col_b, 1.2)
+            # bottom-left
+            dl.add_line(x1, y2, x1 + TICK_LEN, y2, col_b, 1.2)
+            dl.add_line(x1, y2, x1, y2 - TICK_LEN, col_b, 1.2)
+            # bottom-right
+            dl.add_line(x2, y2, x2 - TICK_LEN, y2, col_b, 1.2)
+            dl.add_line(x2, y2, x2, y2 - TICK_LEN, col_b, 1.2)
+            # centre cross-hair dot so the position is obvious
+            mx_ = (x1 + x2) / 2.0; my_ = (y1 + y2) / 2.0
+            dl.add_circle_filled(mx_, my_, 2.5, u(br, bg, bb, b_alpha))
+        else:
+            dl.add_rect(x1, y1, x2, y2, u(br, bg, bb, 0.90), thickness=1.5)
 
         if state.show_conf:
             bw = x2 - x1
-            lbl   = "Player"
+            lbl   = "Player" if not bridged else "~Player"
             lsz   = imgui.calc_text_size(lbl)
             lx    = x1 + (bw - lsz.x) / 2.0
             ly    = y1 - lsz.y - 2
+            txt_a = 0.30 if bridged else 0.55
             for ox, oy in ((-1,0),(1,0),(0,-1),(0,1)):
-                dl.add_text(lx+ox, ly+oy, u(0,0,0,0.45), lbl)
-            dl.add_text(lx, ly, u(br,bg,bb,0.55), lbl)
-            pct   = f"{conf:.0%}"
+                dl.add_text(lx+ox, ly+oy, u(0,0,0,0.35), lbl)
+            dl.add_text(lx, ly, u(br,bg,bb, txt_a), lbl)
+            pct   = f"~{conf:.0%}" if bridged else f"{conf:.0%}"
             psz   = imgui.calc_text_size(pct)
             px_   = x2 + 4
             py_   = y1 + (y2 - y1) / 2.0 - psz.y / 2.0
             for ox, oy in ((-1,0),(1,0),(0,-1),(0,1)):
-                dl.add_text(px_+ox, py_+oy, u(0,0,0,0.45), pct)
-            dl.add_text(px_, py_, u(cr2,cg2,cb2,0.60), pct)
+                dl.add_text(px_+ox, py_+oy, u(0,0,0,0.35), pct)
+            dl.add_text(px_, py_, u(cr2,cg2,cb2, 0.35 if bridged else 0.60), pct)
 
 # ════════════════════════════════════════════════════════
 #  DEBUG WINDOW
@@ -1048,7 +1088,12 @@ def _detector_loop():
         return list(zip(x1.tolist(), y1.tolist(), x2.tolist(), y2.tolist(), sc.tolist()))
 
     while True:
-        if not state.enabled: time.sleep(0.05); continue
+        if not state.enabled:
+            # Clear smoothed tracks so visuals go blank immediately when disabled
+            with state.lock:
+                state.detections  = []
+                state.smooth_dets = []
+            time.sleep(0.05); continue
 
         want_device = _GPU_DEVICE if (state.use_gpu and _any_gpu_ok()) else "cpu"
         mp = state.model_path.strip()
@@ -1283,18 +1328,29 @@ def _detector_loop():
         with state.lock:
             state.detections = dets
             state.debug_frame = dbg
-            # ── temporal smoothing ──────────────────────────────────────────
-            # Each tracked entry: [x1,y1,x2,y2,conf, ttl]
-            # Two-pass matching prevents ghost tracks when players move fast:
-            #   Pass 1 – IoU match  (stationary / slow movement)
-            #   Pass 2 – nearest-center fallback  (fast movement, IoU=0)
-            # A prev track is matched at most once; ghosts cannot form.
-            TTL_MAX   = 2     # frames a track survives without a match (low = no ghost trails)
-            IOU_MIN   = 0.10  # low threshold – catch slow movers in pass 1
-            DIST_MAX  = 160   # px between centers – max distance for fallback match
-            VIS_ALPHA = 0.85  # high alpha = near-instant tracking, still filters pixel noise
-            prev      = state.smooth_dets
-            updated   = []
+
+            # ── temporal smoothing + bridge confidence ──────────────────────
+            # Track entry layout: [x1,y1,x2,y2, conf, ttl, bridged, vx,vy]
+            #   vx/vy = per-track velocity (px/frame) for prediction during gaps
+            #
+            # Bridge Confidence (BETA): when enabled, TTL is extended and the
+            # track position is extrapolated by its velocity so the box keeps
+            # moving plausibly during detection misses.  Bridged tracks are
+            # flagged [6]=True so draw_detections renders them differently.
+            #
+            # Two-pass matching (IoU then nearest-center) prevents ghost tracks.
+
+            IOU_MIN   = 0.10   # low – catch slow movers in pass 1
+            DIST_MAX  = 160    # px between centers – max for fallback match
+            VIS_ALPHA = 0.85   # blending factor – high = near-instant, still smooths noise
+
+            if state.bridge_confidence:
+                TTL_MAX   = 10   # ~10 detection frames ≈ 0.3 s bridge at 30 fps det
+            else:
+                TTL_MAX   = 2    # default: vanish in 2 frames (no ghost trails)
+
+            prev    = state.smooth_dets
+            updated = []
 
             def _cx(b): return (b[0]+b[2])/2.0
             def _cy(b): return (b[1]+b[3])/2.0
@@ -1308,12 +1364,23 @@ def _detector_loop():
                 ua = (a[2]-a[0])*(a[3]-a[1]); ub = (b[2]-b[0])*(b[3]-b[1])
                 return inter / max(1, ua+ub-inter)
 
+            def _get_vel(pd):
+                """Return stored vx,vy from track (safe for old-format entries)."""
+                return (pd[7], pd[8]) if len(pd) > 8 else (0.0, 0.0)
+
             def _blend(pi, nd):
-                ox1,oy1,ox2,oy2,_oc,_ttl = prev[pi]
+                """Blend previous track with new detection; update velocity."""
+                ox1,oy1,ox2,oy2 = prev[pi][0],prev[pi][1],prev[pi][2],prev[pi][3]
                 nx1,ny1,nx2,ny2,nc = nd
                 bx1 = int(ox1 + VIS_ALPHA*(nx1-ox1)); by1 = int(oy1 + VIS_ALPHA*(ny1-oy1))
                 bx2 = int(ox2 + VIS_ALPHA*(nx2-ox2)); by2 = int(oy2 + VIS_ALPHA*(ny2-oy2))
-                return [bx1,by1,bx2,by2, nc, TTL_MAX]
+                # velocity: EMA of displacement (in blended coords)
+                pvx, pvy = _get_vel(prev[pi])
+                raw_vx = bx1 - ox1; raw_vy = by1 - oy1
+                VEL_A = 0.45
+                new_vx = pvx + VEL_A * (raw_vx - pvx)
+                new_vy = pvy + VEL_A * (raw_vy - pvy)
+                return [bx1,by1,bx2,by2, nc, TTL_MAX, False, new_vx, new_vy]
 
             matched_prev = set()
             matched_new  = set()
@@ -1342,15 +1409,26 @@ def _detector_loop():
                     matched_prev.add(best_pi); matched_new.add(ni)
                 else:
                     # Truly new detection – no prev track nearby
-                    updated.append([nd[0],nd[1],nd[2],nd[3], nd[4], TTL_MAX])
+                    updated.append([nd[0],nd[1],nd[2],nd[3], nd[4], TTL_MAX,
+                                    False, 0.0, 0.0])
                     matched_new.add(ni)
 
-            # Decay unmatched prev tracks – TTL_MAX=2 means they vanish in 2 frames max
+            # Decay / predict unmatched prev tracks
             for pi, pd in enumerate(prev):
                 if pi not in matched_prev:
                     ttl = pd[5] - 1
                     if ttl > 0:
-                        updated.append([pd[0],pd[1],pd[2],pd[3], pd[4], ttl])
+                        pvx, pvy = _get_vel(pd)
+                        if state.bridge_confidence:
+                            # Extrapolate position by stored velocity
+                            ox1,oy1,ox2,oy2 = pd[0],pd[1],pd[2],pd[3]
+                            px1 = int(ox1 + pvx); py1 = int(oy1 + pvy)
+                            px2 = int(ox2 + pvx); py2 = int(oy2 + pvy)
+                            updated.append([px1,py1,px2,py2, pd[4], ttl,
+                                            True, pvx, pvy])
+                        else:
+                            updated.append([pd[0],pd[1],pd[2],pd[3], pd[4], ttl,
+                                            False, pvx, pvy])
             state.smooth_dets = updated
         frames += 1; now = time.time()
         if now - t0 >= 1.0:
@@ -1701,6 +1779,65 @@ def _gui():
         state.confidence = round(draw_slider(dl,int(sx),int(sy),SL_W,
                                               "confidence",state.confidence,
                                               0.05,0.95,"%.2f"), 2); j+=1
+
+        # ── Bridge Confidence [BETA] toggle ──────────────────
+        # Draws the row background + switch manually so we can add the (?)
+        ry_bc, clicked_bc = _row_bg(j)
+        bc_label = "Bridge Confidence"
+        lw_bc = imgui.calc_text_size(bc_label).x
+        lh_bc = imgui.calc_text_size(bc_label).y
+        # dim or bright depending on whether it's on
+        _label(ry_bc, bc_label, state.bridge_confidence)
+        # [BETA] tag next to label
+        beta_lbl = "[BETA]"
+        beta_sz  = imgui.calc_text_size(beta_lbl)
+        bx_tag   = x0 + int(8*sc) + lw_bc + int(5*sc)
+        by_tag   = ry_bc + (rowh - beta_sz.y) / 2.0
+        dl.add_text(bx_tag, by_tag, u(0.85, 0.70, 0.25, 0.80), beta_lbl)
+        # (?) tooltip badge
+        qm_lbl  = "(?)"
+        qm_sz   = imgui.calc_text_size(qm_lbl)
+        qm_x    = bx_tag + beta_sz.x + int(4*sc)
+        qm_y    = ry_bc + (rowh - qm_sz.y) / 2.0
+        dl.add_text(qm_x, qm_y, ct(C_DIM, 0.70), qm_lbl)
+        mouse_bc = imgui.get_mouse_pos()
+        in_qm_bc = (qm_x <= mouse_bc[0] <= qm_x + qm_sz.x) and \
+                   (qm_y  <= mouse_bc[1] <= qm_y  + qm_sz.y)
+        if in_qm_bc:
+            _tip_bc = ("Bridge Confidence [BETA]\n"
+                       "Not fully tested – may produce ghost boxes.\n"
+                       "\n"
+                       "When ON, tracks persist and slide forward\n"
+                       "using estimated velocity when YOLO misses\n"
+                       "a detection (e.g. distant/occluded targets).\n"
+                       "\n"
+                       "Bridged boxes appear as corner ticks + ~label\n"
+                       "so you can tell live vs predicted in real time.")
+            fdl_bc = imgui.get_foreground_draw_list()
+            _lines_bc  = _tip_bc.split("\n")
+            _lh_bc     = imgui.calc_text_size("A").y
+            _tp_w_bc   = max(imgui.calc_text_size(l).x for l in _lines_bc) + int(16*sc)
+            _tp_h_bc   = _lh_bc * len(_lines_bc) + int(10*sc)
+            _tp_x_bc   = int(clamp(mouse_bc[0] + 12, 4, SW - _tp_w_bc - 4))
+            _tp_y_bc   = int(clamp(mouse_bc[1] - _tp_h_bc // 2, 4, SH - _tp_h_bc - 4))
+            fdl_bc.add_rect_filled(_tp_x_bc, _tp_y_bc,
+                                   _tp_x_bc+_tp_w_bc, _tp_y_bc+_tp_h_bc,
+                                   u(0.06,0.06,0.10,0.97))
+            fdl_bc.add_rect(_tp_x_bc, _tp_y_bc,
+                            _tp_x_bc+_tp_w_bc, _tp_y_bc+_tp_h_bc,
+                            ct(C_BORDER,0.85), thickness=1.0)
+            for _li_bc, _line_bc in enumerate(_lines_bc):
+                _col_bc = (u(0.85,0.70,0.25,1.0) if _li_bc == 0
+                           else ct(C_TEXT,1.0) if _li_bc <= 2
+                           else ct(C_DIM,0.85))
+                fdl_bc.add_text(_tp_x_bc+int(8*sc),
+                                _tp_y_bc+int(5*sc)+_li_bc*_lh_bc,
+                                _col_bc, _line_bc)
+        # switch widget
+        sw_x_bc = x0+gw-SW_W-PAD_R; sw_y_bc = ry_bc+(rowh-SW_H)/2.0
+        draw_switch(dl, int(sw_x_bc), int(sw_y_bc), "bridge_confidence", state.bridge_confidence)
+        if clicked_bc: state.bridge_confidence = not state.bridge_confidence
+        j+=1
 
         # FOV size – single slider, centred square
         max_fov = 300
