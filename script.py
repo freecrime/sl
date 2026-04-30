@@ -137,6 +137,10 @@ class State:
     dpi_scale    = 100.0
     use_gpu      = False   # toggled in Settings; only active if CUDA is available
 
+    # Overlay FPS cap (does NOT affect detection thread)
+    cap_overlay_fps       = False   # master toggle
+    overlay_fps_limit     = 60.0    # target overlay FPS when cap is enabled
+
     # ── Placeholder / Aim Assist ──────────────────────────
     aim_enabled       = False   # master toggle for aim assist
     aim_hotkey        = 0x02    # VK code for aim hotkey (default: RMB)
@@ -258,11 +262,13 @@ def _export_cfg(name: str = ""):
         f"click_on_person   = {int(state.click_on_person)}\n",
         f"show_outline      = {int(state.show_outline)}\n",
         f"\n[settings]\n",
-        f"watermark       = {int(state.watermark)}\n",
-        f"chromatic       = {int(state.chromatic)}\n",
-        f"stream_proof    = {int(state.stream_proof)}\n",
-        f"dpi_scale       = {state.dpi_scale:.1f}\n",
-        f"use_gpu         = {int(state.use_gpu)}\n",
+        f"watermark           = {int(state.watermark)}\n",
+        f"chromatic           = {int(state.chromatic)}\n",
+        f"stream_proof        = {int(state.stream_proof)}\n",
+        f"dpi_scale           = {state.dpi_scale:.1f}\n",
+        f"use_gpu             = {int(state.use_gpu)}\n",
+        f"cap_overlay_fps     = {int(state.cap_overlay_fps)}\n",
+        f"overlay_fps_limit   = {state.overlay_fps_limit:.1f}\n",
     ]
     try:
         with open(path, "w", encoding="utf-8") as fh:
@@ -348,6 +354,8 @@ def _load_cfg(filename: str):
     state.stream_proof= _b("stream_proof", state.stream_proof)
     state.dpi_scale   = _f("dpi_scale",    state.dpi_scale)
     state.use_gpu     = _b("use_gpu",    state.use_gpu)
+    state.cap_overlay_fps   = _b("cap_overlay_fps",   state.cap_overlay_fps)
+    state.overlay_fps_limit = _f("overlay_fps_limit", state.overlay_fps_limit)
 
     print(f"[Verai] Config loaded ← {path}")
 
@@ -1744,6 +1752,9 @@ def _gui():
         _toggle_row(j,"Show Outline",
                     lambda: state.show_outline,
                     lambda v: setattr(state,"show_outline",v)); j+=1
+        _toggle_row(j,"Chromatic Top",
+                    lambda: state.chromatic,
+                    lambda v: setattr(state,"chromatic",v));    j+=1
         _toggle_row(j,"Show FOV Box",
                     lambda: state.show_fov,
                     lambda v: setattr(state,"show_fov",v));     j+=1
@@ -1828,9 +1839,14 @@ def _gui():
         _toggle_row(j,"Watermark",
                     lambda: state.watermark,
                     lambda v: setattr(state,"watermark",v));    j+=1
-        _toggle_row(j,"Chromatic Top",
-                    lambda: state.chromatic,
-                    lambda v: setattr(state,"chromatic",v));    j+=1
+        _toggle_row(j,"Cap Overlay FPS",
+                    lambda: state.cap_overlay_fps,
+                    lambda v: setattr(state,"cap_overlay_fps",v)); j+=1
+        if state.cap_overlay_fps:
+            _slider_row(j, "FPS Limit",
+                        lambda: state.overlay_fps_limit,
+                        lambda v: setattr(state, "overlay_fps_limit", max(10.0, v)),
+                        10.0, 240.0, "%.0f"); j+=1
         _toggle_row(j,"Stream Proof",
                     lambda: state.stream_proof,
                     lambda v: setattr(state,"stream_proof",v)); j+=1
@@ -2443,8 +2459,28 @@ def run():
     print(f"  Place model files in: {_ASSETS_DIR}")
 
     frames = 0; t0 = time.time()
+    _overlay_deadline = time.perf_counter()  # deadline-based FPS cap – corrects sleep overshoot
 
     while not glfw.window_should_close(win):
+        # ── Overlay FPS cap (detection thread is unaffected) ──────────────
+        # Uses a rolling deadline so sleep overshoot from one frame is
+        # subtracted from the next sleep, keeping long-run FPS accurate.
+        if state.cap_overlay_fps and state.overlay_fps_limit > 0:
+            _min_frame = 1.0 / state.overlay_fps_limit
+            _overlay_deadline += _min_frame
+            _now_pc = time.perf_counter()
+            # If we're already past the deadline (e.g. cap was just enabled,
+            # or the frame took longer than the budget), reset to avoid a
+            # burst of zero-sleep frames catching up.
+            if _overlay_deadline < _now_pc - _min_frame:
+                _overlay_deadline = _now_pc + _min_frame
+            _to_sleep = _overlay_deadline - time.perf_counter()
+            if _to_sleep > 0:
+                time.sleep(_to_sleep)
+        else:
+            # Cap is off – keep deadline fresh so enabling it mid-run is clean
+            _overlay_deadline = time.perf_counter()
+        # ─────────────────────────────────────────────────────────────────
         glfw.poll_events(); impl.process_inputs()
         frames += 1; now = time.time()
         if now - t0 >= 1.0:
